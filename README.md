@@ -36,21 +36,26 @@ Three importable n8n sub-workflows. Use one, two, or all three:
 
 ---
 
-## The Problem Nobody Talks About
+## The Problem
 
-The AI agent market hit **$7.84B** in 2025. Gartner predicts 40% of enterprise apps will have task-specific agents by end of 2026.
+<p align="center">
+  <img src="./assets/timeline.png" alt="27-hour silent incident timeline — May 4th" width="100%"/>
+</p>
 
-But here's what the frameworks don't ship:
+May 4th. The SQLite layer underneath our n8n instance failed. The `/healthz` endpoint returned 200 the entire time. Four webhook callers had `.catch(() => {})`. Zero log lines. Zero alerts. We found out when a prospect mentioned they'd submitted a form two days earlier and never heard back.
 
-> **No error classification.** A 429 rate limit needs a different recovery than a 400 context overflow. Most agents retry both the same way — or don't retry at all.
+**27 hours of silent lead loss.**
 
-> **No context management.** One large tool result fills your context window. The model loses track. The agent hallucinates or crashes. You don't find out until a pipeline breaks.
+That forced an audit of every workflow. The results:
 
-> **No permission granularity.** Your agent either has full tool access or none. There's no middle ground between "can do anything" and "can do nothing."
+- **14 workflows** had no error handling whatsoever
+- **8 workflows** had retry logic that treated a `429 rate limit` identically to a `401 auth failure`
+- **All of them** would silently die on a large tool output (50KB+ web scrape, big DB dump)
+- **None** had a permission layer — agents had full access to every tool, always
 
-These are the same problems Anthropic solved inside Claude Code with an **823-line retry system**, **four compaction strategies**, and a **seven-stage permission pipeline**.
+These aren't edge cases. They're what n8n agent workflows look like in production before someone fixes them.
 
-**AgentGuard brings those patterns to n8n.**
+**AgentGuard is the fix.**
 
 ---
 
@@ -87,7 +92,7 @@ const config = {
   maxRetries: 5,
   baseDelay: 500,
   maxDelay: 32000,
-  fallbackModel: "gemma4:e4b",  // local Ollama = $0/call
+  fallbackModel: "llama3.2:3b",  // local Ollama = $0/call
   fallbackEndpoint: "http://localhost:11434/v1/chat/completions"
 };
 
@@ -95,7 +100,7 @@ const config = {
 const config = {
   maxResultChars: 8000,
   compactionThreshold: 0.80,
-  summaryModel: "gemma4:e4b",
+  summaryModel: "llama3.2:3b",
   summaryEndpoint: "http://localhost:11434/v1/chat/completions",  // update for cloud
   protectedTailTurns: 3
 };
@@ -134,10 +139,10 @@ Not all errors are the same. RetryClassifier parses every HTTP failure and route
 
 **Model fallback chain:**
 ```
-Claude Haiku → Gemini Flash → Local Ollama (gemma4:e4b) → Fail gracefully
+Primary API → Backup API → Local Ollama (any model) → Fail gracefully
 ```
 
-When your primary API is rate-limited or down, your agent keeps working on local inference at $0/call.
+When your primary API is rate-limited or down, your agent keeps running on local inference at $0/call.
 
 [Full docs →](./docs/retry-classifier.md)
 
@@ -231,22 +236,20 @@ We got tired of it. We built the reliability layer. Then we open-sourced it.
 
 ## Want More?
 
-AgentGuard is the free foundation. If you need the full stack:
+AgentGuard is the free foundation. If you need the full production stack:
 
 | | AgentGuard | Managed Stack |
 |:--|:-----------|:--------------|
 | RetryClassifier | ✅ | ✅ |
 | ContextBudget | ✅ | ✅ |
 | PermissionGate | ✅ | ✅ |
-| Trust Dashboard | — | Real-time agent monitoring UI |
-| Multi-agent orchestration | — | Coordinated sub-agent execution |
-| Voice AI integration | — | Pipecat voice stack, sub-$0.05/call |
-| MoE model routing | — | Smart router, local inference priority |
-| Dedicated support | — | Direct Slack channel |
+| Agent monitoring dashboard | — | Real-time visibility across all agents |
+| Multi-agent orchestration | — | Coordinated execution with shared state |
+| Voice AI integration | — | Inbound/outbound voice pipeline |
+| Dedicated support | — | Direct Slack channel, same-day response |
 | **Price** | **Free** | **[Let's talk →](https://genticai.pro)** |
 
 **Premium n8n templates** — [gentic-n8n.deals](https://gentic-n8n.deals)
-**Managed agents ($50/mo)** — [solo.genticai.pro](https://solo.genticai.pro)
 **Enterprise infrastructure** — [genticai.pro](https://genticai.pro)
 
 ---
