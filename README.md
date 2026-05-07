@@ -3,11 +3,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/gentic-ai/agentguard/stargazers"><img src="https://img.shields.io/github/stars/gentic-ai/agentguard?style=for-the-badge&color=00ff88&labelColor=0d1117" alt="GitHub Stars"/></a>
-  <a href="https://github.com/gentic-ai/agentguard/network/members"><img src="https://img.shields.io/github/forks/gentic-ai/agentguard?style=for-the-badge&color=4f9cf9&labelColor=0d1117" alt="GitHub Forks"/></a>
-  <a href="https://github.com/gentic-ai/agentguard/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-8b5cf6?style=for-the-badge&labelColor=0d1117" alt="MIT License"/></a>
+  <a href="https://github.com/genticai-pro/agentguard/stargazers"><img src="https://img.shields.io/github/stars/genticai-pro/agentguard?style=for-the-badge&color=00ff88&labelColor=0d1117" alt="GitHub Stars"/></a>
+  <a href="https://github.com/genticai-pro/agentguard/network/members"><img src="https://img.shields.io/github/forks/genticai-pro/agentguard?style=for-the-badge&color=4f9cf9&labelColor=0d1117" alt="GitHub Forks"/></a>
+  <a href="https://github.com/genticai-pro/agentguard/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-8b5cf6?style=for-the-badge&labelColor=0d1117" alt="MIT License"/></a>
   <a href="https://n8n.io"><img src="https://img.shields.io/badge/n8n-1.70%2B-f97316?style=for-the-badge&labelColor=0d1117" alt="n8n 1.70+"/></a>
-  <a href="https://github.com/gentic-ai/agentguard/commits/main"><img src="https://img.shields.io/github/last-commit/gentic-ai/agentguard?style=for-the-badge&color=ff6b6b&labelColor=0d1117" alt="Last Commit"/></a>
+  <a href="https://github.com/genticai-pro/agentguard/commits/main"><img src="https://img.shields.io/github/last-commit/genticai-pro/agentguard?style=for-the-badge&color=ff6b6b&labelColor=0d1117" alt="Last Commit"/></a>
 </p>
 
 <p align="center">
@@ -256,7 +256,7 @@ AgentGuard is the free foundation. If you need the full stack:
 PRs welcome. If you've hit an agent failure mode we haven't covered, open an issue with the error output and we'll add a recovery strategy.
 
 ```bash
-git clone https://github.com/gentic-ai/agentguard.git
+git clone https://github.com/genticai-pro/agentguard.git
 cd agentguard
 # Import workflows into your n8n instance
 # Break things. Improve them. Open a PR.
@@ -266,7 +266,7 @@ cd agentguard
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=gentic-ai/agentguard&type=Date)](https://star-history.com/#gentic-ai/agentguard&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=genticai-pro/agentguard&type=Date)](https://star-history.com/#genticai-pro/agentguard&Date)
 
 ---
 

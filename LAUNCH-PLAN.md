@@ -13,7 +13,7 @@ The n8n ecosystem has 9,100+ workflow templates. Almost none address agent relia
 ### Day 1 (Ship Day)
 
 **GitHub repo goes live:**
-- Repo: `gentic-ai/agentguard`
+- Repo: `genticai-pro/agentguard`
 - MIT license
 - 3 importable workflow JSONs
 - README that sells (already written)

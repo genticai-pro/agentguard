@@ -100,7 +100,7 @@ We got tired of our own agents failing silently. Every pattern in AgentGuard was
 
 If you've hit any of these problems, this should help. And if you've hit failure modes we haven't covered, open an issue with the error output and we'll add a recovery strategy.
 
-**GitHub:** https://github.com/gentic-ai/agentguard
+**GitHub:** https://github.com/genticai-pro/agentguard
 
 ---
 
