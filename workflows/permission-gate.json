@@ -1,0 +1,162 @@
+{
+  "name": "AgentGuard — PermissionGate",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "pg-trigger-001",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════\n// AGENTGUARD — PermissionGate v1.0\n// Glob-pattern tool-level allow/deny + audit\n// ═══════════════════════════════════════════════\n\nconst config = {\n  defaultAction: 'prompt',  // 'allow', 'deny', 'prompt'\n  auditLog: true,\n  logDestination: 'output', // 'postgres', 'webhook', 'file', 'output'\n  webhookUrl: '',\n  rules: [\n    // ─── Read Operations (Safe) ───\n    { tool: 'bash',     pattern: 'ls *',       action: 'allow' },\n    { tool: 'bash',     pattern: 'cat *',      action: 'allow' },\n    { tool: 'bash',     pattern: 'grep *',     action: 'allow' },\n    { tool: 'bash',     pattern: 'find *',     action: 'allow' },\n    { tool: 'bash',     pattern: 'head *',     action: 'allow' },\n    { tool: 'bash',     pattern: 'tail *',     action: 'allow' },\n    { tool: 'bash',     pattern: 'wc *',       action: 'allow' },\n    { tool: 'bash',     pattern: 'echo *',     action: 'allow' },\n    { tool: 'bash',     pattern: 'pwd',        action: 'allow' },\n    { tool: 'bash',     pattern: 'whoami',     action: 'allow' },\n    \n    // ─── Git (Read) ───\n    { tool: 'bash',     pattern: 'git status*', action: 'allow' },\n    { tool: 'bash',     pattern: 'git log*',    action: 'allow' },\n    { tool: 'bash',     pattern: 'git diff*',   action: 'allow' },\n    { tool: 'bash',     pattern: 'git branch*', action: 'allow' },\n    \n    // ─── Git (Write — Gate) ───\n    { tool: 'bash',     pattern: 'git commit*',  action: 'prompt' },\n    { tool: 'bash',     pattern: 'git push*',    action: 'prompt' },\n    { tool: 'bash',     pattern: 'git merge*',   action: 'prompt' },\n    \n    // ─── Package Managers ───\n    { tool: 'bash',     pattern: 'npm test*',    action: 'allow' },\n    { tool: 'bash',     pattern: 'npm install*', action: 'prompt' },\n    { tool: 'bash',     pattern: 'pip install*', action: 'prompt' },\n    \n    // ─── Destructive (Block) ───\n    { tool: 'bash',     pattern: 'rm -rf*',     action: 'deny' },\n    { tool: 'bash',     pattern: 'rm -r *',     action: 'deny' },\n    { tool: 'bash',     pattern: 'sudo rm*',    action: 'deny' },\n    { tool: 'bash',     pattern: '*DROP TABLE*', action: 'deny' },\n    { tool: 'bash',     pattern: '*DROP DATABASE*', action: 'deny' },\n    { tool: 'bash',     pattern: '*shutdown*',   action: 'deny' },\n    { tool: 'bash',     pattern: '*reboot*',     action: 'deny' },\n    { tool: 'bash',     pattern: 'chmod 777*',   action: 'deny' },\n    { tool: 'bash',     pattern: '*mkfs*',       action: 'deny' },\n    { tool: 'bash',     pattern: '*dd if=*',     action: 'deny' },\n    \n    // ─── HTTP ───\n    { tool: 'http',     pattern: 'GET *',       action: 'allow' },\n    { tool: 'http',     pattern: 'POST *',      action: 'prompt' },\n    { tool: 'http',     pattern: 'PUT *',       action: 'prompt' },\n    { tool: 'http',     pattern: 'DELETE *',    action: 'deny' },\n    \n    // ─── Database ───\n    { tool: 'database', pattern: 'SELECT *',    action: 'allow' },\n    { tool: 'database', pattern: 'INSERT *',    action: 'prompt' },\n    { tool: 'database', pattern: 'UPDATE *',    action: 'prompt' },\n    { tool: 'database', pattern: 'DELETE *',    action: 'deny' },\n    { tool: 'database', pattern: 'DROP *',      action: 'deny' },\n    { tool: 'database', pattern: 'ALTER *',     action: 'deny' },\n    \n    // ─── File Operations ───\n    { tool: 'file',     pattern: 'read *',      action: 'allow' },\n    { tool: 'file',     pattern: 'write *',     action: 'prompt' },\n    { tool: 'file',     pattern: 'delete *',    action: 'deny' }\n  ]\n};\n\nconst input = $input.first().json;\nconst toolName = (input.toolName || input.tool || '').toLowerCase();\nconst toolInput = input.toolInput || input.input || input.command || '';\n\n// ─── Glob Matcher ───\nfunction globMatch(pattern, text) {\n  const escapedPattern = pattern\n    .replace(/[.+^${}()|[\\]\\\\]/g, '\\\\$&')\n    .replace(/\\*/g, '.*');\n  return new RegExp(`^${escapedPattern}$`, 'i').test(text);\n}\n\n// ─── Rule Evaluation ───\nfunction evaluate(tool, input) {\n  for (const rule of config.rules) {\n    const toolMatch = rule.tool === '*' || globMatch(rule.tool, tool);\n    const inputMatch = rule.pattern === '*' || globMatch(rule.pattern, input);\n    \n    if (toolMatch && inputMatch) {\n      return {\n        matched: true,\n        rule: rule,\n        action: rule.action\n      };\n    }\n  }\n  \n  // No rule matched — use default\n  return {\n    matched: false,\n    rule: null,\n    action: config.defaultAction\n  };\n}\n\n// ─── Execute ───\nconst evaluation = evaluate(toolName, toolInput);\n\nconst auditEntry = {\n  timestamp: new Date().toISOString(),\n  tool: toolName,\n  input: toolInput.slice(0, 500), // Truncate for audit\n  ruleMatched: evaluation.matched ? `${evaluation.rule.tool}:${evaluation.rule.pattern}` : 'default',\n  action: evaluation.action,\n  decision: evaluation.action === 'allow' ? 'APPROVED' : evaluation.action === 'deny' ? 'BLOCKED' : 'PENDING_APPROVAL'\n};\n\nreturn [{\n  json: {\n    // Decision\n    action: evaluation.action,\n    approved: evaluation.action === 'allow',\n    blocked: evaluation.action === 'deny',\n    needsApproval: evaluation.action === 'prompt',\n    \n    // Context for the model\n    modelMessage: evaluation.action === 'deny' \n      ? `Permission denied: ${toolName} with input matching '${evaluation.rule?.pattern || 'default deny'}' is blocked by policy.`\n      : evaluation.action === 'prompt'\n        ? `This action requires operator approval. Waiting for confirmation.`\n        : null,\n    \n    // Rule info\n    ruleMatched: evaluation.matched,\n    matchedPattern: evaluation.rule ? `${evaluation.rule.tool}:${evaluation.rule.pattern}` : 'default',\n    \n    // Pass through original request\n    toolName,\n    toolInput,\n    originalRequest: input,\n    \n    // Audit\n    audit: config.auditLog ? auditEntry : null,\n    \n    _agTimestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "pg-evaluate-001",
+      "name": "Evaluate Permission",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "allow",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": "Allowed"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "deny",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": "Blocked"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "prompt",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": "Needs Approval"
+            }
+          ]
+        }
+      },
+      "id": "pg-switch-001",
+      "name": "Route Decision",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "execute_tool"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "pg-allow-001",
+      "name": "Execute Tool",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [900, 160]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "blocked"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "pg-deny-001",
+      "name": "Return Block Error",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [900, 320]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "awaiting_approval"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "pg-prompt-001",
+      "name": "Request Approval",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [900, 480]
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [{ "node": "Evaluate Permission", "type": "main", "index": 0 }]
+      ]
+    },
+    "Evaluate Permission": {
+      "main": [
+        [{ "node": "Route Decision", "type": "main", "index": 0 }]
+      ]
+    },
+    "Route Decision": {
+      "main": [
+        [{ "node": "Execute Tool", "type": "main", "index": 0 }],
+        [{ "node": "Return Block Error", "type": "main", "index": 0 }],
+        [{ "node": "Request Approval", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "agentguard" },
+    { "name": "security" },
+    { "name": "permissions" }
+  ]
+}

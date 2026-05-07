@@ -1,0 +1,126 @@
+{
+  "name": "AgentGuard — ContextBudget",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "cb-trigger-001",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════\n// AGENTGUARD — ContextBudget v1.0\n// Tool result budgeting + two-tier compaction\n// ═══════════════════════════════════════════════\n\nconst config = {\n  maxResultChars: 8000,\n  previewHeadChars: 500,\n  previewTailChars: 200,\n  compactionThreshold: 0.80,\n  protectedTailTurns: 3,\n  maxConsecutiveCompactions: 3,\n  summaryModel: 'gemma4:e4b',\n  summaryEndpoint: 'http://localhost:11434/v1/chat/completions'  // CONFIGURE: set your Ollama or OpenAI-compatible endpoint,\n  persistPath: '/tmp/agentguard/tool_results',\n  contextWindowTokens: 128000,\n  charsPerToken: 4\n};\n\nconst input = $input.first().json;\nconst toolResults = input.toolResults || [];\nconst conversationHistory = input.conversationHistory || [];\nconst turnNumber = input.turnNumber || 0;\nconst compactionFailures = input._agCompactionFailures || 0;\n\n// ─── Tier 0: Tool Result Budgeting ───\nfunction budgetToolResults(results) {\n  return results.map((result, i) => {\n    const content = typeof result.content === 'string' ? result.content : JSON.stringify(result.content);\n    const charCount = content.length;\n    \n    if (charCount <= config.maxResultChars) {\n      return { ...result, _agBudgeted: false, _agOriginalChars: charCount };\n    }\n    \n    // Truncate with preview\n    const head = content.slice(0, config.previewHeadChars);\n    const tail = content.slice(-config.previewTailChars);\n    const fileRef = `${config.persistPath}/${Date.now()}_tool_${i}.txt`;\n    \n    const truncated = [\n      head,\n      `\\n\\n[... ${charCount - config.previewHeadChars - config.previewTailChars} chars truncated — full result saved to ${fileRef} ...]\\n\\n`,\n      tail\n    ].join('');\n    \n    return {\n      ...result,\n      content: truncated,\n      _agBudgeted: true,\n      _agOriginalChars: charCount,\n      _agTruncatedTo: truncated.length,\n      _agFileRef: fileRef,\n      _agFullContent: content  // Pass to file writer\n    };\n  });\n}\n\n// ─── Tier 1: Microcompact (zero cost) ───\nfunction microcompact(history, currentTurn) {\n  return history.map((msg, i) => {\n    // Only process tool results\n    if (msg.role !== 'tool' && !msg._agIsToolResult) return msg;\n    \n    // Protect recent turns\n    const msgTurn = msg._agTurn || 0;\n    if (currentTurn - msgTurn <= config.protectedTailTurns) return msg;\n    \n    // Already compacted\n    if (msg._agMicrocompacted) return msg;\n    \n    return {\n      ...msg,\n      content: '[Previous tool result cleared — re-execute tool if needed]',\n      _agMicrocompacted: true,\n      _agOriginalChars: (msg.content || '').length,\n      _agClearedAtTurn: currentTurn\n    };\n  });\n}\n\n// ─── Tier 2: Auto-compact (model call) ───\nfunction estimateTokens(history) {\n  const totalChars = history.reduce((sum, msg) => {\n    const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || '');\n    return sum + content.length;\n  }, 0);\n  return Math.ceil(totalChars / config.charsPerToken);\n}\n\nfunction needsAutoCompact(history) {\n  const tokens = estimateTokens(history);\n  const usage = tokens / config.contextWindowTokens;\n  return usage >= config.compactionThreshold;\n}\n\nfunction buildSummaryPrompt(history, protectedCount) {\n  const toSummarize = history.slice(0, -protectedCount);\n  const text = toSummarize.map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`).join('\\n');\n  \n  return {\n    model: config.summaryModel,\n    messages: [{\n      role: 'user',\n      content: `Summarize this conversation context in 3-5 sentences. Preserve: key decisions, file paths modified, current task state, any numbers or IDs. Drop: verbose tool outputs, repeated information, greetings.\\n\\n${text}`\n    }],\n    max_tokens: 500,\n    temperature: 0.1\n  };\n}\n\n// ─── Execute Pipeline ───\n\n// Step 1: Budget tool results\nconst budgetedResults = budgetToolResults(toolResults);\nconst savedToFile = budgetedResults.filter(r => r._agBudgeted);\n\n// Step 2: Microcompact history\nconst microcompacted = microcompact(conversationHistory, turnNumber);\nconst microcompactedCount = microcompacted.filter(m => m._agMicrocompacted && m._agClearedAtTurn === turnNumber).length;\n\n// Step 3: Check if auto-compact needed\nconst needsCompact = needsAutoCompact(microcompacted);\nconst compactionBlocked = compactionFailures >= config.maxConsecutiveCompactions;\n\nlet autoCompactRequest = null;\nif (needsCompact && !compactionBlocked) {\n  autoCompactRequest = buildSummaryPrompt(microcompacted, config.protectedTailTurns);\n}\n\nreturn [{\n  json: {\n    // Budgeted tool results (use these instead of originals)\n    toolResults: budgetedResults.map(r => {\n      const { _agFullContent, ...clean } = r;\n      return clean;\n    }),\n    \n    // Files to persist (pipe to file writer node)\n    filesToPersist: savedToFile.map(r => ({\n      path: r._agFileRef,\n      content: r._agFullContent\n    })),\n    \n    // Compacted history\n    conversationHistory: microcompacted,\n    \n    // Compaction status\n    microcompactedCount,\n    needsAutoCompact: needsCompact,\n    compactionBlocked,\n    autoCompactRequest,\n    \n    // Token estimate\n    estimatedTokens: estimateTokens(microcompacted),\n    contextUsage: (estimateTokens(microcompacted) / config.contextWindowTokens).toFixed(3),\n    \n    // State tracking\n    _agCompactionFailures: compactionBlocked ? compactionFailures : (needsCompact ? compactionFailures : 0),\n    _agTurnNumber: turnNumber,\n    \n    // Audit\n    _agTimestamp: new Date().toISOString(),\n    _agBudgetReport: {\n      totalResults: toolResults.length,\n      truncated: savedToFile.length,\n      charsSaved: savedToFile.reduce((s, r) => s + r._agOriginalChars - r._agTruncatedTo, 0),\n      microcompacted: microcompactedCount\n    }\n  }\n}];"
+      },
+      "id": "cb-budget-001",
+      "name": "Budget & Compact",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "needs-compact",
+              "leftValue": "={{ $json.needsAutoCompact }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "cb-if-001",
+      "name": "Needs Auto-Compact?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.autoCompactRequest ? ($json.autoCompactRequest.endpoint || 'http://localhost:11434/v1/chat/completions') : '' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.autoCompactRequest) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "cb-summarize-001",
+      "name": "Summarize (Cheapest Model)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Replace old messages with summary\nconst input = $input.first().json;\nconst summary = input?.choices?.[0]?.message?.content || 'Summary unavailable.';\n\nreturn [{\n  json: {\n    summary,\n    action: 'replace_history_prefix',\n    _agAutoCompacted: true,\n    _agTimestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "cb-replace-001",
+      "name": "Replace History Prefix",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "action",
+              "value": "pass_through"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "cb-pass-001",
+      "name": "Pass Through",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [880, 420]
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [{ "node": "Budget & Compact", "type": "main", "index": 0 }]
+      ]
+    },
+    "Budget & Compact": {
+      "main": [
+        [{ "node": "Needs Auto-Compact?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Needs Auto-Compact?": {
+      "main": [
+        [{ "node": "Summarize (Cheapest Model)", "type": "main", "index": 0 }],
+        [{ "node": "Pass Through", "type": "main", "index": 0 }]
+      ]
+    },
+    "Summarize (Cheapest Model)": {
+      "main": [
+        [{ "node": "Replace History Prefix", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "agentguard" },
+    { "name": "context-management" },
+    { "name": "compaction" }
+  ]
+}

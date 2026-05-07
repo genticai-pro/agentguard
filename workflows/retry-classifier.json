@@ -1,0 +1,132 @@
+{
+  "name": "AgentGuard — RetryClassifier",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "ag-trigger-001",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════\n// AGENTGUARD — RetryClassifier v1.0\n// 10-class error taxonomy with specific recovery\n// ═══════════════════════════════════════════════\n\nconst config = {\n  maxRetries: 5,\n  baseDelay: 500,\n  maxDelay: 32000,\n  jitterRatio: 0.25,\n  fallbackModel: 'gemma4:e4b',\n  fallbackEndpoint: 'http://localhost:11434/v1/chat/completions',\n  persistentRetry: false,\n  persistentMaxDelay: 300000,\n  consecutiveOverloadThreshold: 3\n};\n\nconst input = $input.first().json;\nconst statusCode = input.statusCode || input.status || 0;\nconst headers = input.headers || {};\nconst body = input.body || input.error || {};\nconst attempt = input._agRetryAttempt || 0;\nconst consecutive529 = input._ag529Count || 0;\nconst errorMessage = typeof body === 'string' ? body : (body.error?.message || body.message || '');\n\n// ─── Classification Engine ───\nfunction classify(code, headers, body, errorMsg) {\n  // Rate Limited\n  if (code === 429) {\n    const retryAfter = parseInt(headers['retry-after'] || '0');\n    const isOverage = headers['x-overage-disabled'] === 'true';\n    if (isOverage) return { class: 'quota_exceeded', retryAfter, permanent: true };\n    if (retryAfter > 20) return { class: 'rate_limited_long', retryAfter };\n    return { class: 'rate_limited', retryAfter: retryAfter || 2 };\n  }\n  \n  // Server Overload\n  if (code === 529 || code === 503) {\n    return { class: 'server_overload', consecutive: consecutive529 + 1 };\n  }\n  \n  // Context Overflow\n  if (code === 400 && (errorMsg.includes('context') || errorMsg.includes('token') || errorMsg.includes('too long') || errorMsg.includes('max_tokens'))) {\n    const match = errorMsg.match(/(\\d+)\\s*(?:tokens|token)/);\n    const actualTokens = match ? parseInt(match[1]) : null;\n    return { class: 'context_overflow', actualTokens };\n  }\n  \n  // Input Validation\n  if (code === 400 || code === 422) {\n    return { class: 'input_validation', noRetry: true };\n  }\n  \n  // Auth Failure\n  if (code === 401 || code === 403) {\n    return { class: 'auth_failure' };\n  }\n  \n  // Network Errors\n  if (code === 0 || errorMsg.includes('ECONNRESET') || errorMsg.includes('EPIPE') || errorMsg.includes('timeout') || errorMsg.includes('ETIMEDOUT')) {\n    return { class: 'network_error' };\n  }\n  \n  // Streaming Stall (custom detection)\n  if (errorMsg.includes('stream') && errorMsg.includes('stall')) {\n    return { class: 'streaming_stall' };\n  }\n  \n  return { class: 'unknown' };\n}\n\n// ─── Recovery Engine ───\nfunction getRecovery(classification, attempt) {\n  const backoff = Math.min(config.baseDelay * Math.pow(2, attempt), config.maxDelay);\n  const jitter = Math.random() * config.jitterRatio * backoff;\n  const delay = Math.round(backoff + jitter);\n  \n  switch (classification.class) {\n    case 'rate_limited':\n      return {\n        action: 'retry',\n        delay: classification.retryAfter * 1000,\n        switchModel: false,\n        message: `Rate limited. Waiting ${classification.retryAfter}s (from Retry-After header).`\n      };\n    \n    case 'rate_limited_long':\n      return {\n        action: 'retry',\n        delay: Math.min(classification.retryAfter * 1000, 1800000),\n        switchModel: false,\n        message: `Long rate limit: ${classification.retryAfter}s. Entering cooldown.`\n      };\n    \n    case 'quota_exceeded':\n      return {\n        action: 'switch_model',\n        delay: 0,\n        switchModel: true,\n        targetModel: config.fallbackModel,\n        targetEndpoint: config.fallbackEndpoint,\n        permanent: true,\n        message: 'Quota exceeded. Permanently switching to fallback model.'\n      };\n    \n    case 'server_overload':\n      if (classification.consecutive >= config.consecutiveOverloadThreshold) {\n        return {\n          action: 'switch_model',\n          delay: 0,\n          switchModel: true,\n          targetModel: config.fallbackModel,\n          targetEndpoint: config.fallbackEndpoint,\n          message: `${classification.consecutive} consecutive 529s. Switching to fallback.`\n        };\n      }\n      return {\n        action: 'retry',\n        delay,\n        switchModel: false,\n        message: `Server overloaded (${classification.consecutive}/${config.consecutiveOverloadThreshold} before fallback). Backoff ${delay}ms.`\n      };\n    \n    case 'context_overflow':\n      return {\n        action: 'compact_and_retry',\n        delay: 0,\n        switchModel: false,\n        compactionNeeded: true,\n        actualTokens: classification.actualTokens,\n        message: 'Context overflow. Triggering compaction before retry.'\n      };\n    \n    case 'auth_failure':\n      return {\n        action: attempt === 0 ? 'refresh_and_retry' : 'fail',\n        delay: 0,\n        switchModel: false,\n        clearCache: true,\n        message: attempt === 0 ? 'Auth failed. Clearing cache, refreshing token.' : 'Auth failed after refresh. Escalating.'\n      };\n    \n    case 'network_error':\n      return {\n        action: 'retry',\n        delay,\n        switchModel: false,\n        disableKeepAlive: true,\n        message: `Network error. Fresh connection. Backoff ${delay}ms.`\n      };\n    \n    case 'streaming_stall':\n      return {\n        action: 'retry_non_streaming',\n        delay: 0,\n        switchModel: false,\n        disableStreaming: true,\n        message: 'Stream stalled. Retrying with non-streaming request.'\n      };\n    \n    case 'input_validation':\n      return {\n        action: 'fail',\n        delay: 0,\n        switchModel: false,\n        message: `Validation error: ${errorMessage}. No retry — fix input.`\n      };\n    \n    default:\n      return {\n        action: attempt < config.maxRetries ? 'retry' : 'fail',\n        delay,\n        switchModel: false,\n        message: `Unknown error (${statusCode}). ${attempt < config.maxRetries ? `Retry ${attempt + 1}/${config.maxRetries}.` : 'Max retries. Failing.'}`\n      };\n  }\n}\n\n// ─── Execute ───\nconst classification = classify(statusCode, headers, body, errorMessage);\nconst recovery = getRecovery(classification, attempt);\n\nconst shouldRetry = recovery.action !== 'fail' && attempt < config.maxRetries;\n\nreturn [{\n  json: {\n    // Classification\n    errorClass: classification.class,\n    statusCode,\n    \n    // Recovery decision\n    action: recovery.action,\n    shouldRetry,\n    delay: recovery.delay,\n    message: recovery.message,\n    \n    // Model switching\n    switchModel: recovery.switchModel || false,\n    targetModel: recovery.targetModel || null,\n    targetEndpoint: recovery.targetEndpoint || null,\n    \n    // Flags\n    compactionNeeded: recovery.compactionNeeded || false,\n    disableKeepAlive: recovery.disableKeepAlive || false,\n    disableStreaming: recovery.disableStreaming || false,\n    clearAuthCache: recovery.clearCache || false,\n    permanent: recovery.permanent || false,\n    \n    // State tracking\n    _agRetryAttempt: attempt + 1,\n    _ag529Count: classification.class === 'server_overload' ? (consecutive529 + 1) : 0,\n    \n    // Audit\n    _agTimestamp: new Date().toISOString(),\n    _agInput: input\n  }\n}];"
+      },
+      "id": "ag-classify-001",
+      "name": "Classify Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "should-retry",
+              "leftValue": "={{ $json.shouldRetry }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "ag-if-001",
+      "name": "Should Retry?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "amount": "={{ $json.delay }}",
+        "unit": "milliseconds"
+      },
+      "id": "ag-wait-001",
+      "name": "Backoff Wait",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [880, 200]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "retry"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ag-set-retry",
+      "name": "Set Retry",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "failed"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ag-set-fail",
+      "name": "Set Failed",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [880, 420]
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [{ "node": "Classify Error", "type": "main", "index": 0 }]
+      ]
+    },
+    "Classify Error": {
+      "main": [
+        [{ "node": "Should Retry?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Should Retry?": {
+      "main": [
+        [{ "node": "Backoff Wait", "type": "main", "index": 0 }],
+        [{ "node": "Set Failed", "type": "main", "index": 0 }]
+      ]
+    },
+    "Backoff Wait": {
+      "main": [
+        [{ "node": "Set Retry", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": [
+    { "name": "agentguard" },
+    { "name": "reliability" },
+    { "name": "error-handling" }
+  ]
+}
